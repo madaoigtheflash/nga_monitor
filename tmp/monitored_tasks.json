@@ -1,0 +1,28 @@
+[
+  {
+    "tid": "43098323",
+    "authorid": "150058",
+    "title": "我不是蛇年红包",
+    "author_name": "狼大",
+    "interval": 3600,
+    "enabled": true,
+    "last_check": null,
+    "last_result": {
+      "status": "running",
+      "message": "检查中…"
+    }
+  },
+  {
+    "tid": "44279886",
+    "authorid": "66662897",
+    "title": "短线蛮好做",
+    "author_name": "f佬",
+    "interval": 3600,
+    "enabled": true,
+    "last_check": null,
+    "last_result": {
+      "status": "running",
+      "message": "检查中…"
+    }
+  }
+]
