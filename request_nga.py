@@ -197,8 +197,20 @@ class NgaMonitor:
     def __init__(self, json_path: str, target_tid: str, target_author: str):
         self.json_path = json_path
         self.existing_ids: Set[str] = self._load_existing_ids()
+        self.existing_images: Set[str] = self._load_existing_images()  # 保留用于去重
         self.target_tid = target_tid
         self.target_author = target_author
+    def _load_existing_images(self) -> Set[str]:
+        """只记录已见过的图片URL，防止重复通知"""
+        try:
+            with open("tmp/seen_images.json", "r", encoding="utf-8") as f:
+                return set(json.load(f))
+        except:
+            return set()
+
+    def _save_seen_images(self):
+        with open("tmp/seen_images.json", "w", encoding="utf-8") as f:
+            json.dump(list(self.existing_images), f, ensure_ascii=False)    
     def _load_existing_ids(self) -> Set[str]:
         """加载已保存的post_id集合"""
         try:
@@ -296,6 +308,23 @@ class NgaMonitor:
         
     #     logging.info(f"解析完成，共提取 {len(qa_pairs)} 组问答对")
     #     return qa_pairs
+    def _extract_images(self, html_content: str) -> List[str]:
+        """提取所有真实可访问的图片完整URL（2025年NGA双模式兼容）"""
+        images = set()
+
+        # 方式1：经典 [img]./mon_202511/20/xxx.jpg[/img]
+        pattern1 = r'\[img\]\./(mon_\d{6}/\d{2}/[^]]+\.(jpg|jpeg|png|gif|webp))'
+        for m in re.finditer(pattern1, html_content, re.I):
+            rel_path = m.group(1)
+            images.add(f"https://img.nga.178.com/attachments/{rel_path}")
+
+        # 方式2：JavaScript 动态加载的图片（常见于新版）
+        pattern2 = r"url:'(mon_\d{6}/\d{2}/[^']+\.(jpg|jpeg|png|gif|webp))'"
+        for m in re.finditer(pattern2, html_content, re.I):
+            rel_path = m.group(1)
+            images.add(f"https://img.nga.178.com/attachments/{rel_path}")
+
+        return list(images)
     def _parse_html(self, html: str) -> List[Dict]:
         """增强版HTML解析：支持多种引用/回复模式，适用于2025年最新NGA帖子结构"""
         soup = BeautifulSoup(html, 'html.parser')
@@ -310,7 +339,8 @@ class NgaMonitor:
             content_ub = td.find('div', class_='postbody') or td
             full_html = str(content_ub)
             full_text = content_ub.get_text(separator='\n')
-
+            # 提取图片
+            images = self._extract_images(full_html)
             # 策略1：标准 [quote][/quote] + 答案（您原来的逻辑，保留并优化）
             matches = re.finditer(
                 r'\[quote\].*?\[/quote\]\s*(?:<br\s*/?>|\s)*([^\[]+?)(?=\[quote\]|\[b\]Reply|\Z)',
@@ -325,6 +355,7 @@ class NgaMonitor:
                         'post_id': post_id,
                         'question': '【楼层引用】',
                         'answer': answer,
+                        'images': images,  # 添加图片
                         'type': 'quote_reply',
                         'captured_at': datetime.now().isoformat()
                     })
@@ -354,6 +385,7 @@ class NgaMonitor:
                         'post_id': post_id,
                         'question': f'回复 [{questioner}] ({q_time}) 的楼层',
                         'answer': answer,
+                        'images': images,  # 添加图片
                         'type': 'reply_to_floor',
                         'captured_at': datetime.now().isoformat()
                     })
@@ -368,12 +400,14 @@ class NgaMonitor:
                         'post_id': post_id,
                         'question': '【楼主/作者直接回复】',
                         'answer': clean_text,
+                        'images': images,  # 添加图片
                         'type': 'direct_reply',
                         'captured_at': datetime.now().isoformat()
                     })
 
         logging.info(f"解析完成，共提取 {len(qa_pairs)} 组内容（包含普通回复）")
         return qa_pairs
+    # ==================== 旧版新增检测 ====================
     def find_new_items(self, all_items: List[Dict]) -> List[Dict]:
         """找出真正新增的内容"""
         new_items = []
@@ -389,7 +423,35 @@ class NgaMonitor:
         
         logging.info(f"发现 {len(new_items)} 条新增内容")
         return new_items
+    # def find_new_items(self, all_items: List[Dict]) -> List[Dict]:
+    #     new_items = []
+    #     new_image_urls = []
 
+    #     current_ids = set()
+    #     current_images = set()
+
+    #     for item in all_items:
+    #         post_id = item['post_id']
+    #         current_ids.add(post_id)
+
+    #         item_images = item.get('images', [])
+    #         new_imgs_in_this_post = [url for url in item_images if url not in self.existing_images]
+            
+    #         if post_id not in self.existing_ids or new_imgs_in_this_post:
+    #             item['new_images'] = new_imgs_in_this_post  # 只保留本次真正新增的图
+    #             new_items.append(item)
+    #             new_image_urls.extend(new_imgs_in_this_post)
+
+    #         current_images.update(item_images)
+
+    #     # 更新去重记录
+    #     self.existing_ids = current_ids
+    #     self.existing_images = current_images
+    #     if new_image_urls:
+    #         self._save_seen_images()
+
+    #     logging.info(f"发现 {len(new_items)} 条新增内容，含 {len(new_image_urls)} 张新图")
+    #     return new_items
     def save_all(self, all_items: List[Dict]):
         """合并保存所有数据"""
         try:
@@ -502,12 +564,17 @@ def run_single_check(tid: str, authorid: str, author_name_in: str = None, title_
             for i, item in enumerate(new_items, 1):
                 q = item['question']
                 body += f"【{i}】{q}\n回复：{item['answer'][:2000]}...\n楼层：{item['post_id']}\n" + "─" * 40 + "\n"
-
+            if item.get('images'):
+                body += f"新图 {len(item['images'])} 张：\n"
+                for url in item['images']:
+                    # 微信点击链接自动放大查看
+                    body += f"{url}\n"
+                body += "\n"
             def _send_async():
                 time.sleep(2)  # 错开日志输出
                 send_to_wechat(title + "\n\n" + body)
-            
-            threading.Thread(target=_send_async, daemon=True).start()
+            if len(new_items) < 50:  # 微信消息长度限制
+                threading.Thread(target=_send_async, daemon=True).start()
 
             monitor.save_all(all_items)
 
